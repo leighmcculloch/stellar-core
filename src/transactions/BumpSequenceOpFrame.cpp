@@ -5,6 +5,7 @@
 #include "transactions/BumpSequenceOpFrame.h"
 #include "crypto/SignerKey.h"
 #include "database/Database.h"
+#include "ledger/ProtocolChange.h"
 #include "main/Application.h"
 #include "transactions/TransactionFrame.h"
 #include "transactions/TransactionUtils.h"
@@ -32,7 +33,9 @@ bool
 BumpSequenceOpFrame::isOpSupported(LedgerHeader const& header) const
 {
     return protocolVersionStartsFrom(header.ledgerVersion,
-                                     ProtocolVersion::V_10);
+                                     ProtocolVersion::V_10) &&
+           !isProtocolChangeActive(header,
+                                   PROTOCOL_CHANGE_DISABLE_BUMP_SEQUENCE);
 }
 
 bool

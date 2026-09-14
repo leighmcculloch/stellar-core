@@ -16,6 +16,7 @@
 #include "ledger/LedgerTxnHeader.h"
 #include "ledger/LedgerTypeUtils.h"
 #include "ledger/NetworkConfig.h"
+#include "ledger/ProtocolChange.h"
 #include "ledger/TrustLineWrapper.h"
 #include "main/Config.h"
 #include "rust/RustBridge.h"
@@ -57,6 +58,9 @@ save(JSONOutputArchive& ar, stellar::Upgrades::UpgradeParameters const& p)
     ar(make_nvp("upgradeversion", UPGRADE_VERSION));
     ar(make_nvp("time", stellar::VirtualClock::to_time_t(p.mUpgradeTime)));
     ar(make_nvp("version", p.mProtocolVersion));
+    // Safe to serialize as text: names are validated against the known
+    // change registry before ever being stored.
+    ar(make_nvp("protocolchange", p.mProtocolChange));
     ar(make_nvp("fee", p.mBaseFee));
     ar(make_nvp("maxtxsize", p.mMaxTxSetSize));
     ar(make_nvp("reserve", p.mBaseReserve));
@@ -119,6 +123,7 @@ load(JSONInputArchive& ar, stellar::Upgrades::UpgradeParameters& o)
     load_nvp(ar, "time", t);
     o.mUpgradeTime = stellar::VirtualClock::from_time_t(t);
     load_nvp(ar, "version", o.mProtocolVersion);
+    load_nvp(ar, "protocolchange", o.mProtocolChange, /*throwOnFail*/ false);
     load_nvp(ar, "fee", o.mBaseFee);
     load_nvp(ar, "maxtxsize", o.mMaxTxSetSize);
     load_nvp(ar, "reserve", o.mBaseReserve);
@@ -267,6 +272,21 @@ Upgrades::setParameters(UpgradeParameters const& params, Config const& cfg)
                                    "{:d}, passed is {:d}"),
                         cfg.LEDGER_PROTOCOL_VERSION, *params.mProtocolVersion));
     }
+    if (params.mProtocolChange &&
+        !isKnownProtocolChange(*params.mProtocolChange))
+    {
+        throw std::invalid_argument(
+            fmt::format(FMT_STRING("Unknown protocol change: '{}'"),
+                        *params.mProtocolChange));
+    }
+    if (params.mProtocolChange && params.mProtocolVersion)
+    {
+        // Both move ledgerVersion, so voting for them together would land the
+        // network one past the requested version. Reach the desired numbered
+        // version first, then vote for the change.
+        throw std::invalid_argument(
+            "Cannot set both protocolversion and protocolchange");
+    }
     mParams = params;
 }
 
@@ -342,6 +362,14 @@ Upgrades::createUpgradesFor(LedgerHeader const& lclHeader,
                 *mParams.mMaxSorobanTxSetSize;
         }
     }
+    // Emitted last so that `result` stays sorted by upgrade type, as
+    // StellarValue requires.
+    if (mParams.mProtocolChange &&
+        !isProtocolChangeActive(lclHeader, *mParams.mProtocolChange))
+    {
+        result.emplace_back(LEDGER_UPGRADE_PROTOCOL_CHANGE);
+        result.back().newProtocolChange() = *mParams.mProtocolChange;
+    }
     return result;
 }
 
@@ -388,6 +416,9 @@ Upgrades::applyTo(LedgerUpgrade const& upgrade, Application& app,
     case LEDGER_UPGRADE_MAX_SOROBAN_TX_SET_SIZE:
         upgradeMaxSorobanTxSetSize(ltx, upgrade.newMaxSorobanTxSetSize());
         break;
+    case LEDGER_UPGRADE_PROTOCOL_CHANGE:
+        applyProtocolChangeUpgrade(app, ltx, upgrade.newProtocolChange());
+        break;
     default:
     {
         auto s =
@@ -422,6 +453,9 @@ Upgrades::toString(LedgerUpgrade const& upgrade)
     case LEDGER_UPGRADE_MAX_SOROBAN_TX_SET_SIZE:
         return fmt::format(FMT_STRING("maxsorobantxsetsize={:d}"),
                            upgrade.newMaxSorobanTxSetSize());
+    case LEDGER_UPGRADE_PROTOCOL_CHANGE:
+        return fmt::format(FMT_STRING("protocolchange={}"),
+                           std::string(upgrade.newProtocolChange()));
     default:
         return "<unsupported>";
     }
@@ -452,6 +486,12 @@ Upgrades::toString() const
         }
     };
     appendInfo("protocolversion", mParams.mProtocolVersion);
+    if (mParams.mProtocolChange)
+    {
+        maybePrintUpgradeTime();
+        r << fmt::format(FMT_STRING(", protocolchange={}"),
+                         *mParams.mProtocolChange);
+    }
     appendInfo("basefee", mParams.mBaseFee);
     appendInfo("basereserve", mParams.mBaseReserve);
     appendInfo("maxtxsetsize", mParams.mMaxTxSetSize);
@@ -491,6 +531,7 @@ Upgrades::removeUpgrades(std::vector<UpgradeType>::const_iterator beginUpdates,
         };
 
         resetParamIfSet(res.mProtocolVersion);
+        resetParamIfSet(res.mProtocolChange);
         resetParamIfSet(res.mBaseFee);
         resetParamIfSet(res.mMaxTxSetSize);
         resetParamIfSet(res.mMaxSorobanTxSetSize);
@@ -557,6 +598,14 @@ Upgrades::removeUpgrades(std::vector<UpgradeType>::const_iterator beginUpdates,
         case LEDGER_UPGRADE_MAX_SOROBAN_TX_SET_SIZE:
             resetParam(res.mMaxSorobanTxSetSize, lu.newMaxSorobanTxSetSize());
             break;
+        case LEDGER_UPGRADE_PROTOCOL_CHANGE:
+            if (res.mProtocolChange &&
+                *res.mProtocolChange == lu.newProtocolChange())
+            {
+                res.mProtocolChange.reset();
+                updated = true;
+            }
+            break;
         default:
             // skip unknown
             break;
@@ -590,6 +639,25 @@ Upgrades::isValidForApply(UpgradeType const& opaqueUpgrade,
         res = res && (newVersion <= app.getConfig().LEDGER_PROTOCOL_VERSION);
         // and enforce versions to be strictly monotonic
         res = res && (newVersion > version);
+    }
+    break;
+    case LEDGER_UPGRADE_PROTOCOL_CHANGE:
+    {
+        std::string changeName(upgrade.newProtocolChange());
+        // Only accept a change this build knows how to apply, so that a change
+        // is activated only once the quorum runs software implementing it.
+        res = res && isKnownProtocolChange(changeName);
+        // A change may only be activated once.
+        auto const& lcl = ledgerView.getLedgerHeader().current();
+        res = res && !isProtocolChangeActive(lcl, changeName);
+        // Accepting it advances the protocol version by one, which must still
+        // be a version this build supports. A named change is meant to consume
+        // a version number above the last numbered protocol, so that the
+        // change's name -- not the number it lands on -- is what determines the
+        // new behaviour.
+        res = res && (version + 1 <= app.getConfig().LEDGER_PROTOCOL_VERSION);
+        res = res && (getActivatedProtocolChanges(lcl).size() <
+                      MAX_ACTIVATED_PROTOCOL_CHANGES);
     }
     break;
     case LEDGER_UPGRADE_BASE_FEE:
@@ -683,6 +751,9 @@ Upgrades::isValidForNomination(
         return mParams.mMaxSorobanTxSetSize &&
                (upgrade.newMaxSorobanTxSetSize() ==
                 *mParams.mMaxSorobanTxSetSize);
+    case LEDGER_UPGRADE_PROTOCOL_CHANGE:
+        return mParams.mProtocolChange &&
+               (upgrade.newProtocolChange() == *mParams.mProtocolChange);
     default:
         return false;
     }
@@ -1278,6 +1349,30 @@ Upgrades::applyVersionUpgrade(Application& app, AbstractLedgerTxn& ltx,
         app.getLedgerManager().handleUpgradeAffectingSorobanInMemoryStateSize(
             ltx);
     }
+}
+
+void
+Upgrades::applyProtocolChangeUpgrade(Application& app, AbstractLedgerTxn& ltx,
+                                     std::string const& changeName)
+{
+    uint32_t prevVersion = ltx.loadHeader().current().ledgerVersion;
+
+    // Record the name before the version moves, so that anything the version
+    // upgrade runs sees a header whose version and activated-change list agree.
+    activateProtocolChange(ltx.loadHeader().current(), changeName);
+
+    // An accepted change always advances the protocol version by exactly one.
+    // Which change produced a given version depends on the order the quorum
+    // accepted them in, which is why the name is recorded in the header rather
+    // than inferred from the number. This still goes through
+    // applyVersionUpgrade so that a numbered version's migrations are never
+    // skipped; in the intended use the change consumes a version above the last
+    // numbered protocol, where there are none to run.
+    Upgrades::applyVersionUpgrade(app, ltx, prevVersion + 1);
+
+    CLOG_INFO(Ledger,
+              "Activated protocol change '{}'; protocol version {} -> {}",
+              changeName, prevVersion, prevVersion + 1);
 }
 
 void

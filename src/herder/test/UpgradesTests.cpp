@@ -22,6 +22,7 @@
 #include "ledger/LedgerTypeUtils.h"
 #include "ledger/NetworkConfig.h"
 #include "ledger/P23HotArchiveBug.h"
+#include "ledger/ProtocolChange.h"
 #include "ledger/TrustLineWrapper.h"
 #include "main/CommandHandler.h"
 #include "simulation/LoadGenerator.h"
@@ -204,6 +205,14 @@ makeProtocolVersionUpgrade(int version)
 {
     auto result = LedgerUpgrade{LEDGER_UPGRADE_VERSION};
     result.newLedgerVersion() = version;
+    return result;
+}
+
+LedgerUpgrade
+makeProtocolChangeUpgrade(std::string const& name)
+{
+    auto result = LedgerUpgrade{LEDGER_UPGRADE_PROTOCOL_CHANGE};
+    result.newProtocolChange() = name;
     return result;
 }
 
@@ -4183,4 +4192,156 @@ TEST_CASE("upgrades endpoint sets nomination timeout and expiration minutes",
         REQUIRE(deserialized.mExpirationMinutes.value() ==
                 std::chrono::minutes(20));
     }
+}
+
+TEST_CASE("protocol changes are voted on by name", "[upgrades]")
+{
+    VirtualClock clock;
+    auto cfg = getTestConfig();
+    // A named change consumes the next protocol version, so start two versions
+    // below the highest this build supports to leave room for two of them.
+    cfg.TESTING_UPGRADE_LEDGER_PROTOCOL_VERSION =
+        cfg.LEDGER_PROTOCOL_VERSION - 2;
+    auto app = createTestApplication(clock, cfg);
+
+    auto startVersion = app->getLedgerManager()
+                            .getLastClosedLedgerHeader()
+                            .header.ledgerVersion;
+    REQUIRE(startVersion == cfg.LEDGER_PROTOCOL_VERSION - 2);
+
+    SECTION("accepting a named change increments the protocol version by one")
+    {
+        auto header = executeUpgrade(
+            *app, makeProtocolChangeUpgrade(PROTOCOL_CHANGE_TEST_NO_OP));
+
+        REQUIRE(header.ledgerVersion == startVersion + 1);
+        REQUIRE(isProtocolChangeActive(header, PROTOCOL_CHANGE_TEST_NO_OP));
+        REQUIRE(getActivatedProtocolChanges(header) ==
+                std::vector<std::string>{PROTOCOL_CHANGE_TEST_NO_OP});
+    }
+
+    SECTION("the change accepted first determines the next protocol version")
+    {
+        // Two changes are proposed. Neither names a protocol version, so
+        // whichever the quorum accepts first takes startVersion+1 and the other
+        // takes startVersion+2 -- the assignment is decided by acceptance
+        // order, not by the proposal.
+        std::string first = PROTOCOL_CHANGE_TEST_NO_OP;
+        std::string second = PROTOCOL_CHANGE_DISABLE_BUMP_SEQUENCE;
+
+        SECTION("reversed order")
+        {
+            std::swap(first, second);
+        }
+
+        auto header1 = executeUpgrade(*app, makeProtocolChangeUpgrade(first));
+        REQUIRE(header1.ledgerVersion == startVersion + 1);
+        REQUIRE(isProtocolChangeActive(header1, first));
+        REQUIRE(!isProtocolChangeActive(header1, second));
+
+        auto header2 = executeUpgrade(*app, makeProtocolChangeUpgrade(second));
+        REQUIRE(header2.ledgerVersion == startVersion + 2);
+        REQUIRE(isProtocolChangeActive(header2, first));
+        REQUIRE(isProtocolChangeActive(header2, second));
+    }
+
+    SECTION("an unknown change is not valid")
+    {
+        LedgerUpgradeType type;
+        Upgrades upgrades;
+        REQUIRE(
+            !upgrades.isValid(LedgerTestUtils::toUpgradeType(
+                                  makeProtocolChangeUpgrade("no-such-change")),
+                              type, /*nomination*/ false, *app));
+    }
+
+    SECTION("a change already activated is not valid a second time")
+    {
+        executeUpgrade(*app,
+                       makeProtocolChangeUpgrade(PROTOCOL_CHANGE_TEST_NO_OP));
+
+        LedgerUpgradeType type;
+        Upgrades upgrades;
+        REQUIRE(!upgrades.isValid(
+            LedgerTestUtils::toUpgradeType(
+                makeProtocolChangeUpgrade(PROTOCOL_CHANGE_TEST_NO_OP)),
+            type, /*nomination*/ false, *app));
+    }
+}
+
+TEST_CASE("a protocol change cannot exceed the highest supported version",
+          "[upgrades]")
+{
+    VirtualClock clock;
+    auto cfg = getTestConfig();
+    // Exactly one version of headroom.
+    cfg.TESTING_UPGRADE_LEDGER_PROTOCOL_VERSION =
+        cfg.LEDGER_PROTOCOL_VERSION - 1;
+    auto app = createTestApplication(clock, cfg);
+
+    // Consume the headroom.
+    auto header = executeUpgrade(
+        *app, makeProtocolChangeUpgrade(PROTOCOL_CHANGE_TEST_NO_OP));
+    REQUIRE(header.ledgerVersion == cfg.LEDGER_PROTOCOL_VERSION);
+
+    // A second change is known and not yet active, so the only thing making it
+    // invalid is that there is no version left for it to consume.
+    auto const& next = PROTOCOL_CHANGE_DISABLE_BUMP_SEQUENCE;
+    REQUIRE(isKnownProtocolChange(next));
+    REQUIRE(!isProtocolChangeActive(
+        app->getLedgerManager().getLastClosedLedgerHeader().header, next));
+
+    LedgerUpgradeType type;
+    Upgrades upgrades;
+    REQUIRE(!upgrades.isValid(
+        LedgerTestUtils::toUpgradeType(makeProtocolChangeUpgrade(next)), type,
+        /*nomination*/ false, *app));
+}
+
+TEST_CASE("protocolversion and protocolchange cannot be voted together",
+          "[upgrades]")
+{
+    VirtualClock clock;
+    auto cfg = getTestConfig();
+    cfg.TESTING_UPGRADE_LEDGER_PROTOCOL_VERSION =
+        cfg.LEDGER_PROTOCOL_VERSION - 1;
+    auto app = createTestApplication(clock, cfg);
+
+    Upgrades::UpgradeParameters params;
+    params.mUpgradeTime = VirtualClock::from_time_t(1);
+    params.mProtocolVersion =
+        std::make_optional<uint32>(cfg.LEDGER_PROTOCOL_VERSION);
+    params.mProtocolChange = PROTOCOL_CHANGE_TEST_NO_OP;
+
+    Upgrades upgrades;
+    // Both move ledgerVersion, so accepting them together would overshoot.
+    REQUIRE_THROWS_AS(upgrades.setParameters(params, cfg),
+                      std::invalid_argument);
+}
+
+TEST_CASE("disable-bump-sequence protocol change", "[upgrades]")
+{
+    VirtualClock clock;
+    auto cfg = getTestConfig();
+    // One version of headroom for the change to consume.
+    cfg.TESTING_UPGRADE_LEDGER_PROTOCOL_VERSION =
+        cfg.LEDGER_PROTOCOL_VERSION - 1;
+    auto app = createTestApplication(clock, cfg);
+
+    auto root = app->getRoot();
+    auto& lm = app->getLedgerManager();
+    auto a1 = root->create("A", lm.getLastMinBalance(0) + 1000000);
+
+    // BumpSequence works before the change is activated.
+    a1.bumpSequence(a1.loadSequenceNumber() + 10);
+
+    executeUpgrade(
+        *app, makeProtocolChangeUpgrade(PROTOCOL_CHANGE_DISABLE_BUMP_SEQUENCE));
+
+    REQUIRE(isProtocolChangeActive(lm.getLastClosedLedgerHeader().header,
+                                   PROTOCOL_CHANGE_DISABLE_BUMP_SEQUENCE));
+
+    // Once activated, the operation is no longer supported.
+    REQUIRE_THROWS_AS(a1.bumpSequence(a1.loadSequenceNumber() + 10),
+                      ex_opNOT_SUPPORTED);
 }

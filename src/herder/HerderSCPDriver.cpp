@@ -1031,6 +1031,22 @@ HerderSCPDriver::combineCandidates(uint64_t slotIndex,
                         std::max(clUpgrade.newMaxSorobanTxSetSize(),
                                  lupgrade.newMaxSorobanTxSetSize());
                     break;
+                case LEDGER_UPGRADE_PROTOCOL_CHANGE:
+                    // Validators may propose different changes in the same
+                    // slot. Only one can be accepted per ledger, since each
+                    // increments the protocol version, so pick one
+                    // deterministically; the others remain proposed and can be
+                    // accepted in a later ledger. Note this always favours the
+                    // lexicographically greatest name, so a change can be held
+                    // back while later-named ones keep being proposed; it gets
+                    // in once those are accepted or withdrawn.
+                    if (clUpgrade.newProtocolChange() <
+                        lupgrade.newProtocolChange())
+                    {
+                        clUpgrade.newProtocolChange() =
+                            lupgrade.newProtocolChange();
+                    }
+                    break;
                 default:
                     // should never get there with values that are not valid
                     throw std::runtime_error("invalid upgrade step");

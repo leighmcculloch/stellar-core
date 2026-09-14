@@ -9,6 +9,7 @@
 #include "ledger/LedgerManager.h"
 #include "ledger/LedgerTxn.h"
 #include "ledger/NetworkConfig.h"
+#include "ledger/ProtocolChange.h"
 #include "lib/http/server.hpp"
 #include "lib/json/json.h"
 #include "main/Application.h"
@@ -622,6 +623,20 @@ CommandHandler::upgrades(std::string const& params, std::string& retStr)
     {
         retStr = mApp.getHerder().getUpgradesJson();
     }
+    else if (s == "listchanges")
+    {
+        // Report the protocol changes this build knows how to apply, so an
+        // operator can discover the names available to vote for.
+        Json::Value root;
+        for (auto const& change : getKnownProtocolChanges())
+        {
+            Json::Value entry;
+            entry["name"] = change.mName;
+            entry["description"] = change.mDescription;
+            root.append(entry);
+        }
+        retStr = root.toStyledString();
+    }
     else if (s == "set")
     {
         Upgrades::UpgradeParameters p;
@@ -646,6 +661,20 @@ CommandHandler::upgrades(std::string const& params, std::string& retStr)
         p.mProtocolVersion =
             parseOptionalParam<uint32>(retMap, "protocolversion");
         p.mFlags = parseOptionalParam<uint32>(retMap, "flags");
+
+        auto protocolChangeIter = retMap.find("protocolchange");
+        if (protocolChangeIter != retMap.end())
+        {
+            if (!isKnownProtocolChange(protocolChangeIter->second))
+            {
+                retStr =
+                    fmt::format(FMT_STRING("unknown protocolchange: '{}' (see "
+                                           "upgrades?mode=listchanges)"),
+                                protocolChangeIter->second);
+                return;
+            }
+            p.mProtocolChange = protocolChangeIter->second;
+        }
 
         auto configXdrIter = retMap.find("configupgradesetkey");
         if (configXdrIter != retMap.end())

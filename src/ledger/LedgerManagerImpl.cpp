@@ -28,6 +28,7 @@
 #include "ledger/LedgerTxnEntry.h"
 #include "ledger/LedgerTxnHeader.h"
 #include "ledger/P23HotArchiveBug.h"
+#include "ledger/ProtocolChange.h"
 #include "ledger/SharedModuleCacheCompiler.h"
 #include "main/Application.h"
 #include "main/CommandHandler.h"
@@ -59,6 +60,7 @@
 
 #include <cstdint>
 #include <fmt/format.h>
+#include <fmt/ranges.h>
 
 #ifdef BUILD_TESTS
 #include "test/TxTests.h"
@@ -1709,6 +1711,22 @@ LedgerManagerImpl::applyLedger(LedgerCloseData const& ledgerData,
     mApplyState.getMetrics().mLedgerAge.set_count(0);
 
     TxSetXDRFrameConstPtr txSet = ledgerData.getTxSet();
+
+    // A named protocol change is only activated on a version this build
+    // supports, but knowing the version is not enough: the build must also
+    // implement every change that has been activated, or it would not reproduce
+    // the behaviour the rest of the network agreed on.
+    auto unknownChanges = getUnknownActivatedProtocolChanges(header.current());
+    if (!unknownChanges.empty())
+    {
+        CLOG_ERROR(Ledger, "Unknown protocol change(s) active: {}",
+                   fmt::join(unknownChanges, ", "));
+        CLOG_ERROR(Ledger, "{}", UPGRADE_STELLAR_CORE);
+        throw std::runtime_error(
+            fmt::format(FMT_STRING("cannot apply ledger with unsupported "
+                                   "protocol change(s): {}"),
+                        fmt::join(unknownChanges, ", ")));
+    }
 
     // If we do not support ledger version, we can't apply that ledger, fail!
     if (header.current().ledgerVersion >

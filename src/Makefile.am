@@ -114,7 +114,12 @@ TEST_FILES = $(TESTDATA_DIR)/stellar-core_example.cfg $(TESTDATA_DIR)/stellar-co
 BUILT_SOURCES = $(SRC_X_FILES:.x=.h) $(GENERATED_VERSION_SOURCES) $(TEST_FILES)
 
 $(SRC_X_FILES:.x=.h): $(XDRC)
-XDR_FEATURE_FLAGS =
+# Enables the experimental name-based protocol change XDR
+# (LEDGER_UPGRADE_PROTOCOL_CHANGE and LedgerHeaderExtensionV2). It is carried as
+# an XDR feature flag, like MS_CLOSE_TIME upstream, so that the .x files still
+# hash identically to stellar/stellar-xdr and the C++/Rust XDR identity check in
+# main.cpp keeps passing unmodified.
+XDR_FEATURE_FLAGS = -DPROTOCOL_CHANGE_BY_NAME
 
 SUFFIXES = .x .h .rs
 .x.h:

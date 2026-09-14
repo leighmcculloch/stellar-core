@@ -73,6 +73,71 @@ The validator will still try to revert the changes by voting for the values it h
 Note that this is still a best effort:
 the node may stay out of sync or crash if it cannot replay history properly (in the case of new features for example).
 
+### Voting on protocol changes by name
+
+Historically an upgrade step named the protocol version it wanted
+(`LEDGER_UPGRADE_VERSION` with `newLedgerVersion`), so the version number both
+identified the change and determined the result. That makes it impossible to
+have two candidate changes outstanding at once, since both would have to claim
+the same next number.
+
+`LEDGER_UPGRADE_PROTOCOL_CHANGE` identifies the change by name instead:
+
+```C++
+case LEDGER_UPGRADE_PROTOCOL_CHANGE:
+    ProtocolChangeName newProtocolChange;
+```
+
+Accepting one increments `ledgerVersion` by exactly one, whatever the name was,
+and records the name in the ledger header
+(`LedgerHeaderExtensionV2.activatedProtocolChanges`). Several changes can be
+proposed at the same time; whichever the quorum accepts first takes the next
+version number and the other takes the one after. Which change a given version
+carries is therefore a fact about the ledger, recorded in the header, rather
+than something derivable from the number.
+
+A named change is meant to consume a version number *above* the last numbered
+protocol, so that the name -- not the number -- is what determines the new
+behaviour. Two rules keep that true:
+
+- `ledgerVersion` is still bounded by the build's `LEDGER_PROTOCOL_VERSION`, so
+  a named change cannot push the ledger onto a version this build, the Soroban
+  host, the bucket list or history verification does not support. Making room
+  for a named change means raising the supported version, exactly as a numbered
+  upgrade would.
+- `protocolversion` and `protocolchange` cannot be voted for together, since
+  both move `ledgerVersion` and the network would overshoot. Reach the desired
+  numbered version first, then vote for the change.
+
+Because the number no longer says which change is in force, a node must also
+implement every change that has been activated:
+
+- A node only votes for, and only accepts, a change whose name appears in its
+  own registry of known changes (`getKnownProtocolChanges()`), so a change is
+  activated only once the quorum runs software that implements it.
+- A node refuses to apply a ledger carrying an activated change it does not
+  know, in addition to the existing check that the version is supported.
+
+Behaviour is gated on the name rather than on a version comparison:
+
+```C++
+return protocolVersionStartsFrom(header.ledgerVersion, ProtocolVersion::V_10) &&
+       !isProtocolChangeActive(header, PROTOCOL_CHANGE_DISABLE_BUMP_SEQUENCE);
+```
+
+If validators propose different changes in the same slot, `combineCandidates`
+picks one deterministically; the others stay proposed and can be accepted in a
+later ledger.
+
+The legacy `LEDGER_UPGRADE_VERSION` step still exists, since a network has to be
+able to reach its current protocol version before any named change is proposed.
+
+The new XDR is carried behind the `PROTOCOL_CHANGE_BY_NAME` XDR feature flag
+(set via `XDR_FEATURE_FLAGS` in `src/Makefile.am`), in the same way as
+`MS_CLOSE_TIME` upstream. `hash-xdrs.sh` strips `#ifdef` blocks before hashing,
+so the .x files still hash identically to `stellar/stellar-xdr` and the
+C++/Rust XDR identity check in `main.cpp` keeps passing unmodified.
+
 ### Supported versions
 Each node has its own way of tracking which version it supports,
 for example a "min version", "max version"; but it can also include things

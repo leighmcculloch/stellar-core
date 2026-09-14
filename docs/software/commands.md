@@ -397,13 +397,24 @@ Most commands return their results in JSON format.
     Retrieves the currently configured upgrade settings.<br>
   * `upgrades?mode=clear`<br>
     Clears any upgrade settings.<br>
-  * `upgrades?mode=set&upgradetime=DATETIME&[basefee=NUM]&[basereserve=NUM]&[maxtxsetsize=NUM]&[protocolversion=NUM]&[configupgradesetkey=ConfigUpgradeSetKey]&[nominationtimeoutlimit=NUM]&[expirationminutes=NUM]`<br>
+  * `upgrades?mode=listchanges`<br>
+    Lists the named protocol changes this build knows how to apply, with a
+    description of each. These are the values accepted by `protocolchange`.<br>
+  * `upgrades?mode=set&upgradetime=DATETIME&[basefee=NUM]&[basereserve=NUM]&[maxtxsetsize=NUM]&[protocolversion=NUM]&[protocolchange=NAME]&[configupgradesetkey=ConfigUpgradeSetKey]&[nominationtimeoutlimit=NUM]&[expirationminutes=NUM]`<br>
     * `upgradetime` is a required date (UTC) in the form `1970-01-01T00:00:00Z`. 
         It is the time the upgrade will be scheduled for. If it is in the past
         by less than `expirationminutes` minutes, the upgrade will occur
         immediately. If it's more than `expirationminutes` minutes, then the
         upgrade will be ignored. `expirationminutes` defaults to `15` if not
         provided.<br>
+    * `protocolchange` (string) The name of a protocol change to vote for, as
+        listed by `mode=listchanges`. Unlike `protocolversion`, this names the
+        change rather than the version number it produces: when the quorum
+        accepts it, `ledgerVersion` goes up by one and the name is recorded in
+        the ledger header. Several changes can be proposed across the network at
+        once, and whichever is accepted first takes the next version number.
+        Cannot be combined with `protocolversion`, since both move
+        `ledgerVersion`.<br>
     * `basefee` (uint32) This is what you would prefer the base fee to be. It is in
         stroops<br>
     * `basereserve` (uint32) This is what you would prefer the base reserve to

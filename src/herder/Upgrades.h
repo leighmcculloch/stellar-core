@@ -53,6 +53,10 @@ class Upgrades
         }
         VirtualClock::system_time_point mUpgradeTime;
         std::optional<uint32> mProtocolVersion;
+        // Name of a protocol change to vote for. Accepting it increments the
+        // ledger protocol version by one, so the change is identified by name
+        // rather than by the version number it produces.
+        std::optional<std::string> mProtocolChange;
         std::optional<uint32> mBaseFee;
         std::optional<uint32> mMaxTxSetSize;
         std::optional<uint32> mBaseReserve;
@@ -143,6 +147,10 @@ class Upgrades
 
     static void applyVersionUpgrade(Application& app, AbstractLedgerTxn& ltx,
                                     uint32_t newVersion);
+
+    static void applyProtocolChangeUpgrade(Application& app,
+                                           AbstractLedgerTxn& ltx,
+                                           std::string const& changeName);
 
     static void applyReserveUpgrade(AbstractLedgerTxn& ltx,
                                     uint32_t newReserve);
