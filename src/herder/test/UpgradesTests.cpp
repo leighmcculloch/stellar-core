@@ -3788,6 +3788,9 @@ TEST_CASE("upgrades serialization roundtrip", "[upgrades]")
    "nominationtimeoutlimit" : {
       "nullopt" : true
    },
+   "protocolchange" : {
+      "nullopt" : true
+   },
    "reserve" : {
       "nullopt" : true
    },
@@ -4322,7 +4325,11 @@ TEST_CASE("protocolversion and protocolchange cannot be voted together",
 TEST_CASE("disable-bump-sequence protocol change", "[upgrades]")
 {
     VirtualClock clock;
-    auto cfg = getTestConfig();
+    // In-memory ledger so the operation is applied and its result observed. On
+    // the normal close path an unsupported operation makes the transaction
+    // invalid, so it is dropped while the tx set is built rather than applied
+    // and rejected. Same reason the inflation "not supported" test uses it.
+    auto cfg = getTestConfig(0, Config::TESTDB_IN_MEMORY);
     // One version of headroom for the change to consume.
     cfg.TESTING_UPGRADE_LEDGER_PROTOCOL_VERSION =
         cfg.LEDGER_PROTOCOL_VERSION - 1;
